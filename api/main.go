@@ -118,8 +118,9 @@ type SpeedTestResult struct {
 }
 
 type SpeedtestResponse struct {
-	Progress []SpeedTestProgress `json:"progress"`
-	Result   SpeedTestResult     `json:"result"`
+	Progress []SpeedTestProgress `json:"progress,omitempty"`
+	Result   *SpeedTestResult    `json:"result,omitempty"`
+	Error    string              `json:"error"`
 }
 
 func runSpeedtest(serverID int) (SpeedtestResponse, error) {
@@ -166,7 +167,7 @@ func runSpeedtest(serverID int) (SpeedtestResponse, error) {
 	if result.Type == "" {
 		return SpeedtestResponse{}, errors.New("no result line")
 	}
-	return SpeedtestResponse{Progress: progress, Result: result}, nil
+	return SpeedtestResponse{Progress: progress, Result: &result}, nil
 }
 
 /* ---------- HTTP handlers ---------- */
@@ -175,14 +176,14 @@ func failuresHandler(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		if err := json.NewEncoder(w).Encode(listFailures()); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, mustMarshal(SpeedtestResponse{Error: err.Error()}), http.StatusInternalServerError)
 		}
 	case http.MethodDelete:
 		purgeFailures()
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		w.Header().Set("Allow", "GET, DELETE")
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, mustMarshal(SpeedtestResponse{Error: "method not allowed"}), http.StatusInternalServerError)
 	}
 }
 
@@ -193,17 +194,25 @@ func speedtestHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := strconv.Atoi(s)
 	if err != nil {
-		http.Error(w, "invalid server id", http.StatusBadRequest)
+		http.Error(w, mustMarshal(SpeedtestResponse{Error: "invalid server ID"}), http.StatusInternalServerError)
 		return
 	}
 	res, err := runSpeedtest(id)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, mustMarshal(SpeedtestResponse{Error: err.Error()}), http.StatusInternalServerError)
 		return
 	}
 	if err := json.NewEncoder(w).Encode(res); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, mustMarshal(SpeedtestResponse{Error: err.Error()}), http.StatusInternalServerError)
 	}
+}
+
+func mustMarshal(s any) string {
+	b, err := json.Marshal(s)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
 }
 
 func main() {
