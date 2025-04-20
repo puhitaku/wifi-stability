@@ -21,38 +21,53 @@ import (
 
 /* ---------- ping watchdog ---------- */
 
-type PingFailure struct {
-	Timestamp time.Time `json:"timestamp"`
+type pingCounter struct {
+	failures    []pingFailure
+	consecutive int
+	failLock    sync.Mutex
 }
 
-var (
-	failures []PingFailure
-	mu       sync.Mutex
-)
-
-func recordFailure() {
-	mu.Lock()
-	failures = append(failures, PingFailure{Timestamp: time.Now()})
-	mu.Unlock()
+type pingFailure struct {
+	Timestamp        time.Time `json:"timestamp"`
+	ConsecutiveCount int       `json:"consecutive_count"`
 }
 
-func listFailures() []PingFailure {
-	mu.Lock()
-	defer mu.Unlock()
-	out := make([]PingFailure, len(failures))
-	copy(out, failures)
+func (p *pingCounter) clearCount() {
+	p.failLock.Lock()
+	defer p.failLock.Unlock()
+
+	p.consecutive = 0
+}
+
+func (p *pingCounter) recordFailure() {
+	p.failLock.Lock()
+	defer p.failLock.Unlock()
+
+	p.consecutive++
+	p.failures = append(p.failures, pingFailure{Timestamp: time.Now(), ConsecutiveCount: p.consecutive})
+}
+
+func (p *pingCounter) ListFailures() []pingFailure {
+	p.failLock.Lock()
+	defer p.failLock.Unlock()
+
+	out := make([]pingFailure, len(p.failures))
+	copy(out, p.failures)
 	return out
 }
 
-func purgeFailures() {
-	mu.Lock()
-	failures = nil
-	mu.Unlock()
+func (p *pingCounter) PurgeFailures() {
+	p.failLock.Lock()
+	defer p.failLock.Unlock()
+
+	p.failures = []pingFailure{}
 }
 
-func pingLoop(ctx context.Context, dest string) {
+func (p *pingCounter) Loop(ctx context.Context, dest string) {
 	t := time.NewTicker(10 * time.Second)
 	defer t.Stop()
+
+	p.PurgeFailures()
 
 	for {
 		select {
@@ -64,11 +79,15 @@ func pingLoop(ctx context.Context, dest string) {
 				args = []string{"-c", "1", "-t", "5", dest}
 			}
 			if err := exec.Command("ping", args...).Run(); err != nil {
-				recordFailure()
+				p.recordFailure()
+			} else {
+				p.clearCount()
 			}
 		}
 	}
 }
+
+var p = &pingCounter{}
 
 /* ---------- speed test schema ---------- */
 
@@ -175,11 +194,11 @@ func runSpeedtest(serverID int) (SpeedtestResponse, error) {
 func failuresHandler(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		if err := json.NewEncoder(w).Encode(listFailures()); err != nil {
+		if err := json.NewEncoder(w).Encode(p.ListFailures()); err != nil {
 			http.Error(w, mustMarshal(SpeedtestResponse{Error: err.Error()}), http.StatusInternalServerError)
 		}
 	case http.MethodDelete:
-		purgeFailures()
+		p.PurgeFailures()
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		w.Header().Set("Allow", "GET, DELETE")
@@ -225,7 +244,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	go pingLoop(ctx, *ping)
+	go p.Loop(ctx, *ping)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/failures", failuresHandler)
